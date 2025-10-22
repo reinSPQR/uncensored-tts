@@ -57,7 +57,7 @@ class Config:
     hf_token: str = os.getenv("HF_TOKEN", "")
     tts_model_repo: str = os.getenv("TTS_MODEL_REPO", "bosonai/higgs-audio-v2-generation-3B-base")
     audio_tokenizer_repo: str = os.getenv("AUDIO_TOKENIZER_REPO", "bosonai/higgs-audio-v2-tokenizer")
-    local_dir: str = os.getenv("LOCAL_DIR", "/root/.cache")
+    local_dir: str = os.getenv("LOCAL_DIR", "checkpoints")
     max_queue_size: int = int(os.getenv("MAX_QUEUE_SIZE", "100"))
     max_concurrent: int = int(os.getenv("MAX_CONCURRENT", "1"))
     sync_timeout: int = int(os.getenv("SYNC_TIMEOUT", "1800"))
@@ -1371,7 +1371,8 @@ async def generate_audio(request: AudioGenerationRequest) -> WebhookAudioPayload
         loop = asyncio.get_event_loop()
         output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline)
 
-        torchaudio.save(f"temp_audio_{request.request_id}.wav", torch.from_numpy(output.audio)[None, :], output.sampling_rate)
+        os.makedirs("output", exist_ok=True)
+        torchaudio.save(os.path.join("output", f"temp_audio_{request.request_id}.wav"), torch.from_numpy(output.audio)[None, :], output.sampling_rate)
         
         logger.info(f"Audio generation completed for task {request.request_id}")
         

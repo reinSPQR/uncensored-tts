@@ -3,3 +3,6 @@ python-datauri
 dotenv
 fastapi
 uvicorn
+torch
+torchaudio
+torchcodec

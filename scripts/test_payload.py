@@ -5,7 +5,7 @@ def main():
     data = {
         "request_id": "123",
         "input_text": "Hello, how are you?",
-        "voice_type": "male"
+        "voice_type": "lumira"
     }
     response = requests.post(url, json=data)
     print(response.json())
