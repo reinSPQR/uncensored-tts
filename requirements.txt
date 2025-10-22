@@ -1,0 +1,5 @@
+git+https://github.com/reinSPQR/higgs-audio
+python-datauri
+dotenv
+fastapi
+uvicorn
