@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 import heapq
 from dataclasses import dataclass, field
 from huggingface_hub import snapshot_download
-
+from scipy.io import wavfile
 from fastapi import FastAPI, HTTPException, Request
 import torch
 from PIL import Image, ImageFile
@@ -1379,9 +1379,10 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
             loop = asyncio.get_event_loop()
             output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline)
 
-            # Convert audio to base64-encoded WAV in memory
+            # Convert audio to base64-encoded WAV in memory using scipy
             audio_buffer = io.BytesIO()
-            torchaudio.save(audio_buffer, torch.from_numpy(output.audio)[None, :], output.sampling_rate, format="wav")
+            # Ensure audio data is in the correct format (int16 for WAV)
+            wavfile.write(audio_buffer, output.sampling_rate, output.audio)
             audio_buffer.seek(0)
             audio_base64 = base64.b64encode(audio_buffer.read()).decode("utf-8")
 
