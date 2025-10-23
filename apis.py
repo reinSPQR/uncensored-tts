@@ -30,6 +30,8 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 from schema import (
     APIError, 
     APIErrorResponse,
+    AudioChunk,
+    ResponseStatus,
     TaskStatus,
     TaskInfo,
     TaskStatusResponse,
@@ -1303,104 +1305,129 @@ async def clear_failure_statistics() -> dict:
 
 
 @app.post("/v1/audios/generate", response_model=WebhookAudioPayload)
-async def generate_audio(request: AudioGenerationRequest) -> WebhookAudioPayload:
+async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
     """Generate audio for a given text"""
+    async def optimized_stream_generator(): 
+        logger.info(f"Starting audio generation for task {request.request_id}")
 
-    logger.info(f"Starting audio generation for task {request.request_id}")
+        async def send_chunk(chunk_obj):
+            """Helper to send chunk with optimized JSON serialization"""
+            # Use model_dump_json() to properly handle datetime serialization
+            chunk_json = chunk_obj.model_dump_json()
+            yield f"data: {chunk_json}\n\n"
 
-    def encode_base64_content_from_file(file_path: str) -> str:
-        """Encode a content from a local file to base64 format."""
-        # Read the file as binary and encode it directly to Base64
-        with open(file_path, "rb") as audio_file:
-            audio_base64 = base64.b64encode(audio_file.read()).decode("utf-8")
-        return audio_base64
+        def encode_base64_content_from_file(file_path: str) -> str:
+            """Encode a content from a local file to base64 format."""
+            # Read the file as binary and encode it directly to Base64
+            with open(file_path, "rb") as audio_file:
+                audio_base64 = base64.b64encode(audio_file.read()).decode("utf-8")
+            return audio_base64
 
-    def get_voice_clone_input_sample(
-        voice_audio_path: str,
-        voice_text_path: str,
-        prompt: str
-    ):
-        with open(os.path.join(os.path.dirname(__file__), voice_text_path), "r") as f:
-            reference_text = f.read()
-        reference_audio = encode_base64_content_from_file(
-            os.path.join(os.path.dirname(__file__), voice_audio_path)
-        )
-        messages = [
-            Message(
-                role="user",
-                content=reference_text,
-            ),
-            Message(
-                role="assistant",
-                content=AudioContent(raw_audio=reference_audio, audio_url="placeholder"),
-            ),
-            Message(
-                role="user",
-                content=prompt,
-            ),
-        ]
-        return ChatMLSample(messages=messages)
-
-    voice_path = VOICE_PATHS[request.voice_type]
-
-    sample = get_voice_clone_input_sample(
-        voice_audio_path=voice_path["audio_path"],
-        voice_text_path=voice_path["text_path"],
-        prompt=request.input_text
-    )
-
-    # Generate audio in thread pool to avoid blocking the event loop
-    def _run_pipeline():
-        try:
-            output: HiggsAudioResponse = tts_serve_engine.generate(
-                chat_ml_sample=sample,
-                max_new_tokens=2048,
-                temperature=0.3,
-                top_p=0.95,
-                top_k=50,
-                stop_strings=["<|end_of_text|>", "<|eot_id|>"],
+        def get_voice_clone_input_sample(
+            voice_audio_path: str,
+            voice_text_path: str,
+            prompt: str
+        ):
+            with open(os.path.join(os.path.dirname(__file__), voice_text_path), "r") as f:
+                reference_text = f.read()
+            reference_audio = encode_base64_content_from_file(
+                os.path.join(os.path.dirname(__file__), voice_audio_path)
             )
+            messages = [
+                Message(
+                    role="user",
+                    content=reference_text,
+                ),
+                Message(
+                    role="assistant",
+                    content=AudioContent(raw_audio=reference_audio, audio_url="placeholder"),
+                ),
+                Message(
+                    role="user",
+                    content=prompt,
+                ),
+            ]
+            return ChatMLSample(messages=messages)
 
-            return output
-        except Exception as e:
-            logger.error(f"Pipeline execution failed for task {request.request_id}: {e}")
-            raise
-    
-    try:
-        # Run the pipeline in a thread pool to keep the event loop responsive
-        loop = asyncio.get_event_loop()
-        output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline)
+        voice_path = VOICE_PATHS[request.voice_type]
 
-        os.makedirs("output", exist_ok=True)
-        torchaudio.save(os.path.join("output", f"temp_audio_{request.request_id}.wav"), torch.from_numpy(output.audio)[None, :], output.sampling_rate)
-        
-        logger.info(f"Audio generation completed for task {request.request_id}")
-        
-    finally:
-        # Clean up resources in finally block to ensure cleanup even on exceptions
-        try:
-            if 'output' in locals():
-                del output
-            del sample
-            
-            # Clean up GPU memory
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                
-        except Exception as cleanup_error:
-            logger.warning(f"Error during cleanup for task {request.request_id}: {cleanup_error}")
-
-    return WebhookAudioPayload(
-        request_id=request.request_id,
-        cdn_url=f"temp_audio_{request.request_id}.wav",
-        status=WebhookTaskStatus(
-            status=TaskStatus.COMPLETED,
-            error=None,
-            progress=None,
-            queue_position=None,
-            total_queue_size=None,
-            estimated_wait_time=None
+        sample = get_voice_clone_input_sample(
+            voice_audio_path=voice_path["audio_path"],
+            voice_text_path=voice_path["text_path"],
+            prompt=request.input_text
         )
+
+        # Generate audio in thread pool to avoid blocking the event loop
+        def _run_pipeline():
+            try:
+                output: HiggsAudioResponse = tts_serve_engine.generate(
+                    chat_ml_sample=sample,
+                    max_new_tokens=2048,
+                    temperature=0.3,
+                    top_p=0.95,
+                    top_k=50,
+                    stop_strings=["<|end_of_text|>", "<|eot_id|>"],
+                )
+
+                return output
+            except Exception as e:
+                logger.error(f"Pipeline execution failed for task {request.request_id}: {e}")
+                raise
+        
+        try:
+            # Run the pipeline in a thread pool to keep the event loop responsive
+            loop = asyncio.get_event_loop()
+            output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline)
+
+            # Convert audio to base64-encoded WAV in memory
+            audio_buffer = io.BytesIO()
+            torchaudio.save(audio_buffer, torch.from_numpy(output.audio)[None, :], output.sampling_rate, format="wav")
+            audio_buffer.seek(0)
+            audio_base64 = base64.b64encode(audio_buffer.read()).decode("utf-8")
+
+            async for chunk in send_chunk(AudioChunk(
+                id=request.request_id,
+                audio_base64=audio_base64,
+                status=ResponseStatus(status=TaskStatus.COMPLETED, progress=100.0, estimated_wait_time=None),
+                finish_reason="stop"
+            )):
+                yield chunk
+            yield "data: [DONE]\n\n"
+            
+            logger.info(f"Audio generation completed for task {request.request_id}")
+        except Exception as e:                    
+            logger.error(f"Error in audio stream generator for task {request.request_id}: {e}")
+            try:
+                async for chunk in send_chunk(AudioChunk(
+                    id=request.request_id,
+                    content=f"Stream error: {str(e)}",
+                    status=ResponseStatus(status=TaskStatus.FAILED, progress=0.0),
+                    finish_reason="error"
+                )):
+                    yield chunk
+                yield "data: [DONE]\n\n"
+            except Exception as cleanup_error:
+                logger.error(f"Error during cleanup for task {request.request_id}: {cleanup_error}")
+        finally:
+            # Clean up resources in finally block to ensure cleanup even on exceptions
+            try:
+                if 'output' in locals():
+                    del output
+                del sample
+
+                # Clean up GPU memory
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception as cleanup_error:
+                logger.warning(f"Error during cleanup for task {request.request_id}: {cleanup_error}")
+    
+    return StreamingResponse(optimized_stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
     )
 
 @app.post("/v1/audios/webhook", response_model=WebhookAudioTaskResponse)
