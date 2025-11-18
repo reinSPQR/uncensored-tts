@@ -1304,7 +1304,7 @@ async def clear_failure_statistics() -> dict:
     return {"status": "success", "message": "Failure statistics cleared"}
 
 
-@app.post("/v1/audios/generate", response_model=WebhookAudioPayload)
+@app.post("/v1/audios/generate", response_model=StreamingResponse)
 async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
     """Generate audio for a given text"""
     async def optimized_stream_generator(): 
