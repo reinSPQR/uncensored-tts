@@ -5,9 +5,9 @@ import json
 def main():
     url = "http://localhost:8000/v1/audios/generate"
     data = {
-        "request_id": "123",
         "input_text": "Hello, how are you?",
-        "voice_type": "lumira"
+        "voice_sample_url": "https://storage.googleapis.com/eternal-ai/test-rein/voice-lumira/lumira.mp3",
+        "voice_sample_text": "Doctor, have you heard of the Avenue des Champs-Élysées? Yes, I happened to be born there. I really wish I could go back and visit one day... what? Oh, no, I appreciate it, but I'm not lonely. I have you, after all! You're my family."
     }
 
     audio_base64 = ""

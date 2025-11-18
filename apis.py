@@ -6,6 +6,7 @@ import asyncio
 import base64
 from boson_multimodal.data_types import AudioContent, Message
 from boson_multimodal.serve.serve_engine import ChatMLSample, HiggsAudioResponse, HiggsAudioServeEngine
+import requests
 import torchaudio
 from transformers import Pipeline
 import uvicorn
@@ -1209,6 +1210,16 @@ async def generate_audio_for_webhook(request_data: WebhookAudioTaskRequest, task
         except Exception as cleanup_error:
             logger.warning(f"Error during cleanup for task {task_id}: {cleanup_error}")
 
+
+def download_file(url: str, local_path: str) -> None:
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+
+    with open(local_path, 'wb') as f:
+        for chunk in response.iter_content(chunk_size=8192):
+            f.write(chunk)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
@@ -1304,7 +1315,7 @@ async def clear_failure_statistics() -> dict:
     return {"status": "success", "message": "Failure statistics cleared"}
 
 
-@app.post("/v1/audios/generate", response_model=StreamingResponse)
+@app.post("/v1/audios/generate", response_class=StreamingResponse)
 async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
     """Generate audio for a given text"""
     async def optimized_stream_generator(): 
@@ -1324,19 +1335,23 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
             return audio_base64
 
         def get_voice_clone_input_sample(
-            voice_audio_path: str,
-            voice_text_path: str,
-            prompt: str
+            voice_sample_url: str,
+            voice_sample_text: str,
+            input_text: str
         ):
-            with open(os.path.join(os.path.dirname(__file__), voice_text_path), "r") as f:
-                reference_text = f.read()
-            reference_audio = encode_base64_content_from_file(
-                os.path.join(os.path.dirname(__file__), voice_audio_path)
-            )
+            folder_path = os.path.join(os.path.dirname(__file__), "user-voice")
+            os.makedirs(folder_path, exist_ok=True)
+
+            audio_file_path = os.path.join(folder_path, f"{request.request_id}.wav")
+            download_file(voice_sample_url, audio_file_path)
+            reference_audio = encode_base64_content_from_file(audio_file_path)
+
+            os.remove(audio_file_path)
+            
             messages = [
                 Message(
                     role="user",
-                    content=reference_text,
+                    content=voice_sample_text,
                 ),
                 Message(
                     role="assistant",
@@ -1344,22 +1359,23 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                 ),
                 Message(
                     role="user",
-                    content=prompt,
+                    content=input_text,
                 ),
             ]
             return ChatMLSample(messages=messages)
 
-        voice_path = VOICE_PATHS[request.voice_type]
-
-        sample = get_voice_clone_input_sample(
-            voice_audio_path=voice_path["audio_path"],
-            voice_text_path=voice_path["text_path"],
-            prompt=request.input_text
-        )
-
         # Generate audio in thread pool to avoid blocking the event loop
         def _run_pipeline():
             try:
+                sample = get_voice_clone_input_sample(
+                    voice_sample_url=request.voice_sample_url,
+                    voice_sample_text=request.voice_sample_text,
+                    input_text=request.input_text
+                )
+
+                logger.info(f"Retrieved voice sample")
+                logger.info(f"Running pipeline for task {request.request_id}")
+
                 output: HiggsAudioResponse = tts_serve_engine.generate(
                     chat_ml_sample=sample,
                     max_new_tokens=2048,
@@ -1421,6 +1437,9 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                     torch.cuda.empty_cache()
             except Exception as cleanup_error:
                 logger.warning(f"Error during cleanup for task {request.request_id}: {cleanup_error}")
+
+    if not request.request_id:
+        request.request_id = str(uuid.uuid4())
     
     return StreamingResponse(optimized_stream_generator(),
         media_type="text/event-stream",

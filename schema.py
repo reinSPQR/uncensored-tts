@@ -125,7 +125,8 @@ class AudioGenerationRequest(BaseModel):
     request_id: Optional[str] = Field(None, description="Request identifier")
     model: str = Field(MODEL_ID, description="The model to use for audio generation")
     input_text: str = Field(..., description="The input text transcript.")
-    voice_type: VoiceType = Field(VoiceType.FEMALE, description="The type of voice to use for the audio generation")
+    voice_sample_url: str = Field(..., description="The URL of the voice sample to use for the audio generation")
+    voice_sample_text: str = Field(..., description="The text of the voice sample to use for the audio generation")
     priority: Optional[Priority] = Field(default=Priority.NORMAL, description="Task priority in queue")
 
 class CancelTaskResponse(BaseModel):
