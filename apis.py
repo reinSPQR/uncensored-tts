@@ -1128,6 +1128,7 @@ async def initialize_pipeline():
         snapshot_download(config.audio_tokenizer_repo, local_dir=local_audio_tokenizer_path)
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Using device: {device}")
         tts_serve_engine = HiggsAudioServeEngine(local_tts_model_path, local_audio_tokenizer_path, device=device)
 
         logger.info("Pipeline initialized successfully")
@@ -1136,90 +1137,90 @@ async def initialize_pipeline():
         raise e
 
 
-async def generate_audio_for_webhook(request_data: WebhookAudioTaskRequest, task_id: str, task_info: TaskInfo, output_path: str) -> None:
-    """Generate audio for webhook task and save directly to file - optimized version"""
-    logger.info(f"Starting audio generation for webhook task {task_id}")
+# async def generate_audio_for_webhook(request_data: WebhookAudioTaskRequest, task_id: str, task_info: TaskInfo, output_path: str) -> None:
+#     """Generate audio for webhook task and save directly to file - optimized version"""
+#     logger.info(f"Starting audio generation for webhook task {task_id}")
 
-    def encode_base64_content_from_file(file_path: str) -> str:
-        """Encode a content from a local file to base64 format."""
-        # Read the file as binary and encode it directly to Base64
-        with open(file_path, "rb") as audio_file:
-            audio_base64 = base64.b64encode(audio_file.read()).decode("utf-8")
-        return audio_base64
+#     def encode_base64_content_from_file(file_path: str) -> str:
+#         """Encode a content from a local file to base64 format."""
+#         # Read the file as binary and encode it directly to Base64
+#         with open(file_path, "rb") as audio_file:
+#             audio_base64 = base64.b64encode(audio_file.read()).decode("utf-8")
+#         return audio_base64
 
-    def get_voice_clone_input_sample(
-        voice_audio_path: str,
-        voice_text_path: str,
-        prompt: str
-    ):
-        with open(os.path.join(os.path.dirname(__file__), voice_text_path), "r") as f:
-            reference_text = f.read()
-        reference_audio = encode_base64_content_from_file(
-            os.path.join(os.path.dirname(__file__), voice_audio_path)
-        )
-        messages = [
-            Message(
-                role="user",
-                content=reference_text,
-            ),
-            Message(
-                role="assistant",
-                content=AudioContent(raw_audio=reference_audio, audio_url="placeholder"),
-            ),
-            Message(
-                role="user",
-                content=prompt,
-            ),
-        ]
-        return ChatMLSample(messages=messages)
+#     def get_voice_clone_input_sample(
+#         voice_audio_path: str,
+#         voice_text_path: str,
+#         prompt: str
+#     ):
+#         with open(os.path.join(os.path.dirname(__file__), voice_text_path), "r") as f:
+#             reference_text = f.read()
+#         reference_audio = encode_base64_content_from_file(
+#             os.path.join(os.path.dirname(__file__), voice_audio_path)
+#         )
+#         messages = [
+#             Message(
+#                 role="user",
+#                 content=reference_text,
+#             ),
+#             Message(
+#                 role="assistant",
+#                 content=AudioContent(raw_audio=reference_audio, audio_url="placeholder"),
+#             ),
+#             Message(
+#                 role="user",
+#                 content=prompt,
+#             ),
+#         ]
+#         return ChatMLSample(messages=messages)
 
-    voice_path = VOICE_PATHS[request_data.voice_type]
+#     voice_path = VOICE_PATHS[request_data.voice_type]
 
-    sample = get_voice_clone_input_sample(
-        voice_audio_path=voice_path["audio_path"],
-        voice_text_path=voice_path["text_path"],
-        prompt=request_data.input_text
-    )
+#     sample = get_voice_clone_input_sample(
+#         voice_audio_path=voice_path["audio_path"],
+#         voice_text_path=voice_path["text_path"],
+#         prompt=request_data.input_text
+#     )
 
-    # Generate audio in thread pool to avoid blocking the event loop
-    def _run_pipeline():
-        try:
-            output: HiggsAudioResponse = tts_serve_engine.generate(
-                chat_ml_sample=sample,
-                max_new_tokens=2048,
-                temperature=0.3,
-                top_p=0.95,
-                top_k=50,
-                stop_strings=["<|end_of_text|>", "<|eot_id|>"],
-            )
+#     # Generate audio in thread pool to avoid blocking the event loop
+#     def _run_pipeline():
+#         try:
+#             output: HiggsAudioResponse = tts_serve_engine.generate(
+#                 chat_ml_sample=sample,
+#                 max_new_tokens=2048,
+#                 temperature=0.3,
+#                 top_p=0.95,
+#                 top_k=50,
+#                 stop_strings=["<|end_of_text|>", "<|eot_id|>"],
+#             )
 
-            return output
-        except Exception as e:
-            logger.error(f"Pipeline execution failed for task {task_id}: {e}")
-            raise
+#             return output
+#         except Exception as e:
+#             logger.error(f"Pipeline execution failed for task {task_id}: {e}")
+#             raise
     
-    try:
-        # Run the pipeline in a thread pool to keep the event loop responsive
-        loop = asyncio.get_event_loop()
-        output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline)
+#     try:
+#         # Run the pipeline in a thread pool to keep the event loop responsive
+#         loop = asyncio.get_event_loop()
+#         output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline)
 
-        torchaudio.save(output_path, torch.from_numpy(output.audio)[None, :], output.sampling_rate)
+#         torchaudio.save(output_path, torch.from_numpy(output.audio)[None, :], output.sampling_rate)
         
-        logger.info(f"Audio generation completed for webhook task {task_id}")
+#         logger.info(f"Audio generation completed for webhook task {task_id}")
         
-    finally:
-        # Clean up resources in finally block to ensure cleanup even on exceptions
-        try:
-            if 'output' in locals():
-                del output
-            del sample
+#     finally:
+#         # Clean up resources in finally block to ensure cleanup even on exceptions
+#         try:
+#             if 'output' in locals():
+#                 del output
+#             del sample
             
-            # Clean up GPU memory
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+#             # Clean up GPU memory
+#             if torch.cuda.is_available():
+#                 torch.cuda.empty_cache()
                 
-        except Exception as cleanup_error:
-            logger.warning(f"Error during cleanup for task {task_id}: {cleanup_error}")
+#         except Exception as cleanup_error:
+#             logger.warning(f"Error during cleanup for task {task_id}: {cleanup_error}")
 
 
 def download_file(url: str, local_path: str) -> None:
