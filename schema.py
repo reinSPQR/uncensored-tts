@@ -55,6 +55,14 @@ class ResponseStatus(BaseModelWithDatetime):
     started_at: Optional[datetime] = Field(None, description="When processing started (only for processing status)")
     estimated_wait_time: Optional[float] = Field(None, description="Estimated wait time in seconds (null if not in queue, queue_position * average_processing_time if in queue)")
 
+class HealthCheckStatus(str, Enum):
+    OK = "ok"
+    SHUTTING_DOWN = "shutting_down"
+
+class InstanceStatus(str, Enum):
+    IDLE = "idle"
+    BUSY = "busy"
+
 class AudioChunk(BaseModelWithDatetime):
     """Individual audio data in the response"""
     id: str = Field(..., description="Request identifier - same for all chunks in a request")
@@ -93,6 +101,10 @@ class QueueStats(BaseModel):
     average_processing_time: Optional[float] = Field(None, description="Average processing time in seconds")
     estimated_wait_time: Optional[float] = Field(None, description="Estimated wait time for new tasks")
     failure_reasons: List[FailureReason] = Field(default_factory=list, description="Detailed breakdown of failure reasons")
+
+class ManagerStats(BaseModel):
+    """Manager statistics schema"""
+    total_processing: int = Field(..., description="Total number of processing tasks")
 
 class TaskInfo(BaseModelWithDatetime):
     """Task information schema"""
@@ -169,3 +181,21 @@ class CDNUploadResult(BaseModel):
     """Result of CDN upload"""
     success: bool = Field(..., description="Whether upload was successful")
     cdn_url: Optional[str] = Field(None, description="URL of uploaded file on CDN")
+
+class HealthCheckResponse(BaseModel):
+    """
+    Represents the response for the health check endpoint.
+    """
+    status: HealthCheckStatus = Field(..., description="The status of the health check")
+
+class InstanceStatusResponse(BaseModel):
+    """
+    Represents the response for the instance status endpoint.
+    """
+    status: InstanceStatus = Field(..., description="The status of the instance")
+
+class ShutdownResponse(BaseModel):
+    """
+    Represents the response for the shutdown endpoint.
+    """
+    status: str = Field(..., description="The status of the shutdown")

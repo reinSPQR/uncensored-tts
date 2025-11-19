@@ -2,6 +2,7 @@ WEBHOOK_URL=
 WEBHOOK_API_KEY=
 BACKEND_UPLOAD_URL=
 BACKEND_UPLOAD_ADMIN_KEY=
+ADMIN_API_KEY=super-secret
 
 docker run -p 8000:8000 \
     -v ./checkpoints:/app/checkpoints \
@@ -11,6 +12,7 @@ docker run -p 8000:8000 \
     -e WEBHOOK_API_KEY=$WEBHOOK_API_KEY \
     -e BACKEND_UPLOAD_URL=$BACKEND_UPLOAD_URL \
     -e BACKEND_UPLOAD_ADMIN_KEY=$BACKEND_UPLOAD_ADMIN_KEY \
+    -e ADMIN_API_KEY=$ADMIN_API_KEY \
     -e HF_HOME=/app/hf_cache \
     -e HUGGINGFACE_HUB_CACHE=/app/hf_cache \
     -e TRANSFORMERS_CACHE=/app/hf_cache \

@@ -20,7 +20,7 @@ import heapq
 from dataclasses import dataclass, field
 from huggingface_hub import snapshot_download
 from scipy.io import wavfile
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Header, Request
 import torch
 from PIL import Image, ImageFile
 from fastapi.responses import StreamingResponse
@@ -32,7 +32,13 @@ from schema import (
     APIError, 
     APIErrorResponse,
     AudioChunk,
+    HealthCheckResponse,
+    HealthCheckStatus,
+    InstanceStatus,
+    InstanceStatusResponse,
+    ManagerStats,
     ResponseStatus,
+    ShutdownResponse,
     TaskStatus,
     TaskInfo,
     TaskStatusResponse,
@@ -83,28 +89,15 @@ class Config:
 
 config = Config()
 
-
-VOICE_PATHS = {
-    VoiceType.MALE: {
-        "audio_path": "sample_voices/male/puck.wav",
-        "text_path": "sample_voices/male/puck.txt",
-    },
-    VoiceType.FEMALE: {
-        "audio_path": "sample_voices/female/belinda.wav",
-        "text_path": "sample_voices/female/belinda.txt",
-    },
-    VoiceType.LUMIRA: {
-        "audio_path": "sample_voices/lumira/lumira.mp3",
-        "text_path": "sample_voices/lumira/lumira.txt",
-    },
-}
-
-
 DEFAULT_AVERAGE_PROCESSING_TIME = config.default_processing_time
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 WEBHOOK_API_KEY = os.getenv("WEBHOOK_API_KEY", "")
 BACKEND_UPLOAD_URL = os.getenv("BACKEND_UPLOAD_URL", "")
 BACKEND_UPLOAD_ADMIN_KEY = os.getenv("BACKEND_UPLOAD_ADMIN_KEY", "no-need")
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+
+# Shutdown state
+is_shutting_down = False
 
 # Configure logging
 logging.basicConfig(level=getattr(logging, config.log_level.upper()))
@@ -125,6 +118,23 @@ class QueuedTask:
         if self.priority != other.priority:
             return self.priority < other.priority
         return self.created_at < other.created_at
+
+
+class TaskManager:
+    def __init__(self):
+        self.task_stats: Dict[str, TaskStatus] = {}
+
+    def add_task(self, task_id: str):
+        self.task_stats[task_id] = TaskStatus.PROCESSING
+
+    def finish_task(self, task_id: str, status: TaskStatus):
+        del self.task_stats[task_id]
+
+    def get_manager_stats(self) -> ManagerStats:
+        return ManagerStats(
+            total_processing=sum(1 for status in self.task_stats.values() if status == TaskStatus.PROCESSING),
+        )
+
 
 class ProductionQueueManager:
     """Production-ready queue manager with concurrency control"""
@@ -1100,9 +1110,10 @@ class WebhookNotifier:
 # Global variables
 tts_serve_engine: HiggsAudioServeEngine | None = None
 
-queue_manager: Optional[ProductionQueueManager] = None
-cdn_uploader: Optional[CDNUploader] = None
-webhook_notifier: Optional[WebhookNotifier] = None
+# queue_manager: Optional[ProductionQueueManager] = None
+# cdn_uploader: Optional[CDNUploader] = None
+# webhook_notifier: Optional[WebhookNotifier] = None
+task_manager: Optional[TaskManager] = None
 
 async def initialize_pipeline():
     """Initialize the audio generation pipeline"""
@@ -1223,7 +1234,7 @@ def download_file(url: str, local_path: str) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
-    global queue_manager, cdn_uploader, webhook_notifier
+    global task_manager
     
     # Startup
     logger.info("Starting up the audio generation API...")
@@ -1232,30 +1243,34 @@ async def lifespan(app: FastAPI):
     await initialize_pipeline()
     
     # Initialize CDN uploader
-    cdn_uploader = CDNUploader(config)
-    logger.info("CDN uploader initialized")
+    # cdn_uploader = CDNUploader(config)
+    # logger.info("CDN uploader initialized")
     
     # Initialize webhook notifier
-    webhook_notifier = WebhookNotifier(config)
-    logger.info("Webhook notifier initialized")
+    # webhook_notifier = WebhookNotifier(config)
+    # logger.info("Webhook notifier initialized")
     
     # Initialize queue manager
-    queue_manager = ProductionQueueManager(
-        max_queue_size=config.max_queue_size, 
-        max_concurrent=config.max_concurrent
-    )
-    await queue_manager.start()
+    # queue_manager = ProductionQueueManager(
+    #     max_queue_size=config.max_queue_size, 
+    #     max_concurrent=config.max_concurrent
+    # )
+    # await queue_manager.start()
+
+    # Initialize task manager
+    task_manager = TaskManager()
+    logger.info("Task manager initialized")
     
     yield
     
     # Shutdown
     logger.info("Shutting down the audio generation API...")
-    if queue_manager:
-        await queue_manager.stop()
-    if webhook_notifier:
-        await webhook_notifier.close_session()
-    if cdn_uploader:
-        await cdn_uploader.close_session()
+    # if queue_manager:
+    #     await queue_manager.stop()
+    # if webhook_notifier:
+    #     await webhook_notifier.close_session()
+    # if cdn_uploader:
+    #     await cdn_uploader.close_session()
 
 # Create FastAPI app
 app = FastAPI(
@@ -1265,54 +1280,96 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-
-
-@app.get("/v1/audios/status/{task_id}", response_model=TaskStatusResponse)
-async def get_task_status(task_id: str):
-    """Get the status of a audio generation task"""
-    if not queue_manager:
-        raise HTTPException(status_code=503, detail="Queue manager not initialized")
+# @app.get("/v1/audios/status/{task_id}", response_model=TaskStatusResponse)
+# async def get_task_status(task_id: str):
+#     """Get the status of a audio generation task"""
+#     if not queue_manager:
+#         raise HTTPException(status_code=503, detail="Queue manager not initialized")
     
-    task_status = await queue_manager.get_task_status(task_id)
+#     task_status = await queue_manager.get_task_status(task_id)
     
-    if not task_status:
-        raise HTTPException(status_code=404, detail="Task not found")
+#     if not task_status:
+#         raise HTTPException(status_code=404, detail="Task not found")
     
-    return task_status
+#     return task_status
 
-@app.get("/health", response_model=dict)
-async def health_check() -> dict:
-    return {"status": "ok"}
+@app.get("/health", response_model=HealthCheckResponse)
+async def health_check() -> HealthCheckResponse:
+    """Check the health of the API"""
+    global is_shutting_down
+    if is_shutting_down:
+        return HealthCheckResponse(status=HealthCheckStatus.SHUTTING_DOWN)
+    return HealthCheckResponse(status=HealthCheckStatus.OK)
 
-@app.get("/v1/queue/stats", response_model=QueueStats)
-async def get_queue_stats() -> QueueStats:
-    """Get the stats of the queue"""
-    if not queue_manager:
-        raise HTTPException(status_code=503, detail="Queue manager not initialized")
-    return queue_manager.get_queue_stats()
+@app.get("/status", response_model=InstanceStatusResponse)
+async def get_instance_status() -> InstanceStatusResponse:
+    """Get the status of the instance - IDLE if no tasks are processing or queued, BUSY otherwise"""
+    global task_manager
 
-@app.get("/v1/cancel/{task_id}", response_model=CancelTaskResponse)
-async def cancel_task(task_id: str) -> CancelTaskResponse:
-    """Cancel a task"""
-    if not queue_manager:
-        raise HTTPException(status_code=503, detail="Queue manager not initialized")
-    queue_manager.cancel_task(task_id)
-    return CancelTaskResponse(status="success", message="Task cancelled")
+    if not task_manager:
+        # If queue manager is not initialized, consider it IDLE
+        return InstanceStatusResponse(status=InstanceStatus.IDLE)
+    
+    # Get queue stats to check if there are any tasks
+    stats = task_manager.get_manager_stats()
+    
+    # Instance is BUSY if there are tasks processing
+    is_busy = stats.total_processing > 0
+    status = InstanceStatus.BUSY if is_busy else InstanceStatus.IDLE
+    
+    return InstanceStatusResponse(status=status)
 
-@app.get("/v1/queue/failures", response_model=List[FailureReason])
-async def get_failure_details() -> List[FailureReason]:
-    """Get detailed failure information for monitoring"""
-    if not queue_manager:
-        raise HTTPException(status_code=503, detail="Queue manager not initialized")
-    return queue_manager.get_failure_reasons()
+@app.get("/shutdown", response_model=ShutdownResponse)
+async def shutdown(x_api_key: str = Header(..., alias="X-API-Key")) -> ShutdownResponse:
+    """Mark the service as shutting down (requires API key authentication)"""
+    global is_shutting_down
+    
+    # Validate API key
+    if not ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="Admin API key not configured"
+        )
+    
+    if x_api_key != ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key"
+        )
+    
+    is_shutting_down = True
+    logger.info("Service marked as shutting down")
+    return ShutdownResponse(status="shutting_down")
 
-@app.post("/v1/queue/failures/clear", response_model=dict)
-async def clear_failure_statistics() -> dict:
-    """Clear failure statistics (maintenance endpoint)"""
-    if not queue_manager:
-        raise HTTPException(status_code=503, detail="Queue manager not initialized")
-    queue_manager.clear_failure_statistics()
-    return {"status": "success", "message": "Failure statistics cleared"}
+# @app.get("/v1/queue/stats", response_model=QueueStats)
+# async def get_queue_stats() -> QueueStats:
+#     """Get the stats of the queue"""
+#     if not queue_manager:
+#         raise HTTPException(status_code=503, detail="Queue manager not initialized")
+#     return queue_manager.get_queue_stats()
+
+# @app.get("/v1/cancel/{task_id}", response_model=CancelTaskResponse)
+# async def cancel_task(task_id: str) -> CancelTaskResponse:
+#     """Cancel a task"""
+#     if not queue_manager:
+#         raise HTTPException(status_code=503, detail="Queue manager not initialized")
+#     queue_manager.cancel_task(task_id)
+#     return CancelTaskResponse(status="success", message="Task cancelled")
+
+# @app.get("/v1/queue/failures", response_model=List[FailureReason])
+# async def get_failure_details() -> List[FailureReason]:
+#     """Get detailed failure information for monitoring"""
+#     if not queue_manager:
+#         raise HTTPException(status_code=503, detail="Queue manager not initialized")
+#     return queue_manager.get_failure_reasons()
+
+# @app.post("/v1/queue/failures/clear", response_model=dict)
+# async def clear_failure_statistics() -> dict:
+#     """Clear failure statistics (maintenance endpoint)"""
+#     if not queue_manager:
+#         raise HTTPException(status_code=503, detail="Queue manager not initialized")
+#     queue_manager.clear_failure_statistics()
+#     return {"status": "success", "message": "Failure statistics cleared"}
 
 
 @app.post("/v1/audios/generate", response_class=StreamingResponse)
@@ -1389,7 +1446,10 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                 logger.error(f"Pipeline execution failed for task {request.request_id}: {e}")
                 raise
         
+        global task_manager
         try:
+            task_manager.add_task(request.request_id)
+
             folder_path = os.path.join(os.path.dirname(__file__), "user-voice")
             os.makedirs(folder_path, exist_ok=True)
             audio_file_path = os.path.join(folder_path, f"{request.request_id}.wav")
@@ -1415,11 +1475,15 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
             )):
                 yield chunk
             yield "data: [DONE]\n\n"
+
+            task_manager.finish_task(request.request_id, TaskStatus.COMPLETED)
             
             logger.info(f"Audio generation completed for task {request.request_id}")
         except Exception as e:                    
             logger.error(f"Error in audio stream generator for task {request.request_id}: {e}")
             try:
+                task_manager.finish_task(request.request_id, TaskStatus.FAILED)
+
                 async for chunk in send_chunk(AudioChunk(
                     id=request.request_id,
                     content=f"Stream error: {str(e)}",
@@ -1461,67 +1525,67 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
         }
     )
 
-@app.post("/v1/audios/webhook", response_model=WebhookAudioTaskResponse)
-async def create_webhook_audio_task(request: WebhookAudioTaskRequest) -> WebhookAudioTaskResponse:
-    """Create a audio generation task with webhook notification"""
+# @app.post("/v1/audios/webhook", response_model=WebhookAudioTaskResponse)
+# async def create_webhook_audio_task(request: WebhookAudioTaskRequest) -> WebhookAudioTaskResponse:
+#     """Create a audio generation task with webhook notification"""
 
-    if not queue_manager:
-        raise HTTPException(status_code=503, detail="Queue manager not initialized")
+#     if not queue_manager:
+#         raise HTTPException(status_code=503, detail="Queue manager not initialized")
     
-    # Generate task ID
-    task_id = request.request_id if request.request_id else str(uuid.uuid4())
+#     # Generate task ID
+#     task_id = request.request_id if request.request_id else str(uuid.uuid4())
 
-    # check if task id already exists
-    if task_id in queue_manager.tasks:
-        raise HTTPException(status_code=400, detail="Task ID already exists")
+#     # check if task id already exists
+#     if task_id in queue_manager.tasks:
+#         raise HTTPException(status_code=400, detail="Task ID already exists")
     
-    try:
-        # Add task to queue
-        queue_position = await queue_manager.add_task(task_id, request)
+#     try:
+#         # Add task to queue
+#         queue_position = await queue_manager.add_task(task_id, request)
 
-        # Send initial queue status webhook notification and start periodic updates
-        if webhook_notifier and WEBHOOK_URL:
-            # Send initial queue status webhook using centralized method
-            webhook_success = await queue_manager._send_queue_status_webhook(
-                task_id, WEBHOOK_URL, WEBHOOK_API_KEY
-            )
+#         # Send initial queue status webhook notification and start periodic updates
+#         if webhook_notifier and WEBHOOK_URL:
+#             # Send initial queue status webhook using centralized method
+#             webhook_success = await queue_manager._send_queue_status_webhook(
+#                 task_id, WEBHOOK_URL, WEBHOOK_API_KEY
+#             )
             
-            if webhook_success:
+#             if webhook_success:
                 
-                logger.info(f"Added webhook audio generation task {task_id} to queue at position {queue_position}")
+#                 logger.info(f"Added webhook audio generation task {task_id} to queue at position {queue_position}")
                 
-                # Get task info for logging
-                task_info = await queue_manager.get_task_status(task_id)
-                if task_info:
-                    logger.info(f"Queue status webhook sent successfully for task {task_id} (position: {task_info.queue_position}/{task_info.total_queue_size})")
+#                 # Get task info for logging
+#                 task_info = await queue_manager.get_task_status(task_id)
+#                 if task_info:
+#                     logger.info(f"Queue status webhook sent successfully for task {task_id} (position: {task_info.queue_position}/{task_info.total_queue_size})")
                 
-                # Start periodic queue status updates
-                queue_webhook_task = asyncio.create_task(
-                    queue_manager._send_periodic_queue_webhooks(task_id, WEBHOOK_URL, WEBHOOK_API_KEY)
-                )
-                # Store the task reference so it can be cancelled later
-                if not hasattr(queue_manager, 'queue_webhook_tasks'):
-                    queue_manager.queue_webhook_tasks = {}
-                queue_manager.queue_webhook_tasks[task_id] = queue_webhook_task
-                logger.info(f"Started periodic queue webhook updates for task {task_id}")
-            else:
-                logger.warning(f"Failed to send queue status webhook for task {task_id}")
+#                 # Start periodic queue status updates
+#                 queue_webhook_task = asyncio.create_task(
+#                     queue_manager._send_periodic_queue_webhooks(task_id, WEBHOOK_URL, WEBHOOK_API_KEY)
+#                 )
+#                 # Store the task reference so it can be cancelled later
+#                 if not hasattr(queue_manager, 'queue_webhook_tasks'):
+#                     queue_manager.queue_webhook_tasks = {}
+#                 queue_manager.queue_webhook_tasks[task_id] = queue_webhook_task
+#                 logger.info(f"Started periodic queue webhook updates for task {task_id}")
+#             else:
+#                 logger.warning(f"Failed to send queue status webhook for task {task_id}")
                 
-                return WebhookAudioTaskResponse(
-                    task_id=task_id,
-                    status=TaskStatus.FAILED
-                )
+#                 return WebhookAudioTaskResponse(
+#                     task_id=task_id,
+#                     status=TaskStatus.FAILED
+#                 )
         
-        return WebhookAudioTaskResponse(
-            task_id=task_id,
-            status=TaskStatus.QUEUED
-        )
+#         return WebhookAudioTaskResponse(
+#             task_id=task_id,
+#             status=TaskStatus.QUEUED
+#         )
         
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error creating webhook task: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}")
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         logger.error(f"Error creating webhook task: {e}")
+#         raise HTTPException(status_code=500, detail=f"Failed to create task: {str(e)}")
 
 @app.get("/v1/models", response_model=ModelsResponse)
 async def list_models() -> ModelsResponse:
