@@ -1363,7 +1363,7 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
 
                 return reference_audio
             except Exception as e:
-                logger.error(f"Error downloading voice sample for task {request.request_id}: {e}")
+                logger.error(f"Downloading voice sample failed for task {request.request_id}: {e}")
                 raise                
 
         # Generate audio in thread pool to avoid blocking the event loop
@@ -1434,7 +1434,10 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
             # Clean up resources in finally block to ensure cleanup even on exceptions
             try:
                 if 'audio_file_path' in locals():
-                    os.remove(audio_file_path)
+                    try:
+                        os.remove(audio_file_path)
+                    except OSError:
+                        pass
                 if 'voice_sample_audio' in locals():
                     del voice_sample_audio
                 if 'output' in locals():
