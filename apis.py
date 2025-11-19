@@ -1335,19 +1335,10 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
             return audio_base64
 
         def get_voice_clone_input_sample(
-            voice_sample_url: str,
+            voice_sample_audio: str,
             voice_sample_text: str,
             input_text: str
         ):
-            folder_path = os.path.join(os.path.dirname(__file__), "user-voice")
-            os.makedirs(folder_path, exist_ok=True)
-
-            audio_file_path = os.path.join(folder_path, f"{request.request_id}.wav")
-            download_file(voice_sample_url, audio_file_path)
-            reference_audio = encode_base64_content_from_file(audio_file_path)
-
-            os.remove(audio_file_path)
-            
             messages = [
                 Message(
                     role="user",
@@ -1355,7 +1346,7 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                 ),
                 Message(
                     role="assistant",
-                    content=AudioContent(raw_audio=reference_audio, audio_url="placeholder"),
+                    content=AudioContent(raw_audio=voice_sample_audio, audio_url="placeholder"),
                 ),
                 Message(
                     role="user",
@@ -1364,17 +1355,25 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
             ]
             return ChatMLSample(messages=messages)
 
+        def _download_voice_sample(audio_file_path: str) -> str:
+            try:
+                # Download the voice sample to a local file
+                download_file(request.voice_sample_url, audio_file_path)
+                reference_audio = encode_base64_content_from_file(audio_file_path)
+
+                return reference_audio
+            except Exception as e:
+                logger.error(f"Error downloading voice sample for task {request.request_id}: {e}")
+                raise                
+
         # Generate audio in thread pool to avoid blocking the event loop
-        def _run_pipeline():
+        def _run_pipeline(voice_sample_audio: str):
             try:
                 sample = get_voice_clone_input_sample(
-                    voice_sample_url=request.voice_sample_url,
+                    voice_sample_audio=voice_sample_audio,
                     voice_sample_text=request.voice_sample_text,
                     input_text=request.input_text
                 )
-
-                logger.info(f"Retrieved voice sample")
-                logger.info(f"Running pipeline for task {request.request_id}")
 
                 output: HiggsAudioResponse = tts_serve_engine.generate(
                     chat_ml_sample=sample,
@@ -1391,9 +1390,15 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                 raise
         
         try:
-            # Run the pipeline in a thread pool to keep the event loop responsive
+            folder_path = os.path.join(os.path.dirname(__file__), "user-voice")
+            os.makedirs(folder_path, exist_ok=True)
+            audio_file_path = os.path.join(folder_path, f"{request.request_id}.wav")
+
             loop = asyncio.get_event_loop()
-            output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline)
+
+            # Run the pipeline in a thread pool to keep the event loop responsive
+            voice_sample_audio = await loop.run_in_executor(None, _download_voice_sample, audio_file_path)
+            output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline, voice_sample_audio)
 
             # Convert audio to base64-encoded WAV in memory using scipy
             audio_buffer = io.BytesIO()
@@ -1428,9 +1433,12 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
         finally:
             # Clean up resources in finally block to ensure cleanup even on exceptions
             try:
+                if 'audio_file_path' in locals():
+                    os.remove(audio_file_path)
+                if 'voice_sample_audio' in locals():
+                    del voice_sample_audio
                 if 'output' in locals():
                     del output
-                del sample
 
                 # Clean up GPU memory
                 if torch.cuda.is_available():
