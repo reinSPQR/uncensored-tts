@@ -1448,33 +1448,85 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                 raise
         
         global task_manager
+        
+        # Variables for processing state and periodic chunk tracking
+        processing_done = False
+        processing_error = None
+        processing_result = {}
+        last_chunk_time = time.time()
+        
+        async def do_processing():
+            """Run the actual processing in a separate task"""
+            nonlocal processing_done, processing_error, processing_result
+            try:
+                folder_path = os.path.join(os.path.dirname(__file__), "user-voice")
+                os.makedirs(folder_path, exist_ok=True)
+                audio_file_path = os.path.join(folder_path, f"{request.request_id}.wav")
+                processing_result['audio_file_path'] = audio_file_path
+
+                # Run the pipeline in a thread pool to keep the event loop responsive
+                loop = asyncio.get_event_loop()
+
+                voice_sample_audio = await loop.run_in_executor(None, _download_voice_sample, audio_file_path)
+                processing_result['voice_sample_audio'] = voice_sample_audio
+                
+                output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline, voice_sample_audio)
+                processing_result['output'] = output
+                
+                audio_buffer = io.BytesIO()
+                # Ensure audio data is in the correct format (int16 for WAV)
+                wavfile.write(audio_buffer, output.sampling_rate, output.audio)
+                audio_buffer.seek(0)
+                processing_result['audio_buffer'] = audio_buffer
+
+                audio_base64 = base64.b64encode(audio_buffer.read()).decode("utf-8")
+                processing_result['audio_base64'] = audio_base64
+            except Exception as e:
+                processing_error = e
+            finally:
+                processing_done = True
+        
         try:
             task_manager.add_task(request.request_id)
+            
+            # Start processing in background
+            processing_task = asyncio.create_task(do_processing())
+            
+            # Send periodic empty chunks while processing to keep connection alive
+            while not processing_done:
+                await asyncio.sleep(0.5)
+                current_time = time.time()
+                if current_time - last_chunk_time >= 5:
+                    async for chunk in send_chunk(AudioChunk(
+                        id=request.request_id,
+                        audio_base64="",
+                        status=ResponseStatus(status=TaskStatus.PROCESSING, progress=50.0, estimated_wait_time=None),
+                        finish_reason=None
+                    )):
+                        yield chunk
+                    last_chunk_time = time.time()
+                    logger.debug(f"Sent periodic empty chunk for task {request.request_id}")
+            
+            # Ensure processing task is complete
+            await processing_task
+            
+            # Check if processing failed
+            if processing_error:
+                raise processing_error
 
-            folder_path = os.path.join(os.path.dirname(__file__), "user-voice")
-            os.makedirs(folder_path, exist_ok=True)
-            audio_file_path = os.path.join(folder_path, f"{request.request_id}.wav")
+            for l in range(0, len(processing_result['audio_base64']), 1024):
+                r = l + 1024
+                is_final_chunk = r >= len(processing_result['audio_base64'])
+                progress = min(r / len(processing_result['audio_base64']), 1) * 100.0
 
-            loop = asyncio.get_event_loop()
-
-            # Run the pipeline in a thread pool to keep the event loop responsive
-            voice_sample_audio = await loop.run_in_executor(None, _download_voice_sample, audio_file_path)
-            output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline, voice_sample_audio)
-
-            # Convert audio to base64-encoded WAV in memory using scipy
-            audio_buffer = io.BytesIO()
-            # Ensure audio data is in the correct format (int16 for WAV)
-            wavfile.write(audio_buffer, output.sampling_rate, output.audio)
-            audio_buffer.seek(0)
-            audio_base64 = base64.b64encode(audio_buffer.read()).decode("utf-8")
-
-            async for chunk in send_chunk(AudioChunk(
-                id=request.request_id,
-                audio_base64=audio_base64,
-                status=ResponseStatus(status=TaskStatus.COMPLETED, progress=100.0, estimated_wait_time=None),
-                finish_reason="stop"
-            )):
-                yield chunk
+                async for chunk in send_chunk(AudioChunk(
+                    id=request.request_id,
+                    audio_base64=processing_result['audio_base64'][l:r],
+                    status=ResponseStatus(status=TaskStatus.PROCESSING, progress=progress, estimated_wait_time=None),
+                    finish_reason="stop" if is_final_chunk else None
+                )):
+                    yield chunk
+            
             yield "data: [DONE]\n\n"
 
             task_manager.finish_task(request.request_id, TaskStatus.COMPLETED)
@@ -1498,15 +1550,19 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
         finally:
             # Clean up resources in finally block to ensure cleanup even on exceptions
             try:
-                if 'audio_file_path' in locals():
+                if 'audio_file_path' in processing_result:
                     try:
-                        os.remove(audio_file_path)
+                        os.remove(processing_result['audio_file_path'])
                     except OSError:
                         pass
-                if 'voice_sample_audio' in locals():
-                    del voice_sample_audio
-                if 'output' in locals():
-                    del output
+                if 'voice_sample_audio' in processing_result:
+                    del processing_result['voice_sample_audio']
+                if 'output' in processing_result:
+                    del processing_result['output']
+                if 'audio_buffer' in processing_result:
+                    del processing_result['audio_buffer']
+                if 'audio_base64' in processing_result:
+                    del processing_result['audio_base64']
 
                 # Clean up GPU memory
                 if torch.cuda.is_available():
