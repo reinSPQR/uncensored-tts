@@ -1,4 +1,5 @@
 import io
+import math
 import os
 import time
 import uuid
@@ -123,12 +124,18 @@ class QueuedTask:
 class TaskManager:
     def __init__(self):
         self.task_stats: Dict[str, TaskStatus] = {}
+        self.queue_lock = asyncio.Lock()
+        self.total_request_count: int = 0
 
-    def add_task(self, task_id: str):
-        self.task_stats[task_id] = TaskStatus.PROCESSING
+    async def add_task(self, task_id: str) -> bool:
+        async with self.queue_lock:
+            self.task_stats[task_id] = TaskStatus.PROCESSING
+            self.total_request_count += 1
+            return self.total_request_count == 1
 
-    def finish_task(self, task_id: str, status: TaskStatus):
-        del self.task_stats[task_id]
+    async def finish_task(self, task_id: str, status: TaskStatus):
+        async with self.queue_lock:
+            del self.task_stats[task_id]
 
     def get_manager_stats(self) -> ManagerStats:
         return ManagerStats(
@@ -1453,7 +1460,6 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
         processing_done = False
         processing_error = None
         processing_result = {}
-        last_chunk_time = time.time()
         
         async def do_processing():
             """Run the actual processing in a separate task"""
@@ -1487,25 +1493,37 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                 processing_done = True
         
         try:
-            task_manager.add_task(request.request_id)
+            is_first_request = await task_manager.add_task(request.request_id)
             
+            expected_processing_time = len(request.input_text) / 30
+            if is_first_request:
+                expected_processing_time += 11.0 # Required time to warm up model on first inference
+
+            logger.info(f"Expected processing time for task {request.request_id}: {expected_processing_time} seconds")
+
             # Start processing in background
             processing_task = asyncio.create_task(do_processing())
-            
+            processing_start_time = time.time()
+            last_chunk_time = time.time()
+
             # Send periodic empty chunks while processing to keep connection alive
             while not processing_done:
                 await asyncio.sleep(0.5)
                 current_time = time.time()
                 if current_time - last_chunk_time >= 5:
+                    progress = (current_time - processing_start_time) / expected_processing_time * 90.0
+                    if progress > 90.0:
+                        overdue_time = current_time - processing_start_time - expected_processing_time
+                        progress = 90.0 + math.min(overdue_time / expected_processing_time, 10) * 0.9
+
                     async for chunk in send_chunk(AudioChunk(
                         id=request.request_id,
                         audio_base64="",
-                        status=ResponseStatus(status=TaskStatus.PROCESSING, progress=50.0, estimated_wait_time=None),
+                        status=ResponseStatus(status=TaskStatus.PROCESSING, progress=progress, estimated_wait_time=None),
                         finish_reason=None
                     )):
                         yield chunk
                     last_chunk_time = time.time()
-                    logger.debug(f"Sent periodic empty chunk for task {request.request_id}")
             
             # Ensure processing task is complete
             await processing_task
@@ -1517,25 +1535,28 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
             for l in range(0, len(processing_result['audio_base64']), 1024):
                 r = l + 1024
                 is_final_chunk = r >= len(processing_result['audio_base64'])
-                progress = min(r / len(processing_result['audio_base64']), 1) * 100.0
 
                 async for chunk in send_chunk(AudioChunk(
                     id=request.request_id,
                     audio_base64=processing_result['audio_base64'][l:r],
-                    status=ResponseStatus(status=TaskStatus.PROCESSING, progress=progress, estimated_wait_time=None),
+                    status=ResponseStatus(
+                        status=TaskStatus.COMPLETED if is_final_chunk else TaskStatus.PROCESSING,
+                        progress=100.0 if is_final_chunk else 99.0,
+                        estimated_wait_time=None
+                    ),
                     finish_reason="stop" if is_final_chunk else None
                 )):
                     yield chunk
             
             yield "data: [DONE]\n\n"
 
-            task_manager.finish_task(request.request_id, TaskStatus.COMPLETED)
+            await task_manager.finish_task(request.request_id, TaskStatus.COMPLETED)
             
             logger.info(f"Audio generation completed for task {request.request_id}")
         except Exception as e:                    
             logger.error(f"Error in audio stream generator for task {request.request_id}: {e}")
             try:
-                task_manager.finish_task(request.request_id, TaskStatus.FAILED)
+                await task_manager.finish_task(request.request_id, TaskStatus.FAILED)
 
                 async for chunk in send_chunk(AudioChunk(
                     id=request.request_id,
