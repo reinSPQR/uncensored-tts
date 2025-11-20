@@ -66,7 +66,7 @@ class Config:
     hf_token: str = os.getenv("HF_TOKEN", "")
     tts_model_repo: str = os.getenv("TTS_MODEL_REPO", "bosonai/higgs-audio-v2-generation-3B-base")
     audio_tokenizer_repo: str = os.getenv("AUDIO_TOKENIZER_REPO", "bosonai/higgs-audio-v2-tokenizer")
-    local_dir: str = os.getenv("LOCAL_DIR", "checkpoints")
+    local_dir: str = os.getenv("LOCAL_DIR", "/root/.cache")
     max_queue_size: int = int(os.getenv("MAX_QUEUE_SIZE", "100"))
     max_concurrent: int = int(os.getenv("MAX_CONCURRENT", "1"))
     sync_timeout: int = int(os.getenv("SYNC_TIMEOUT", "1800"))
