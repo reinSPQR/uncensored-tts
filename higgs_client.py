@@ -1,21 +1,14 @@
-"""Example script for generating audio using HiggsAudio."""
-
-import click
-import soundfile as sf
 import langid
 import jieba
 import os
-import re
 import copy
-import torchaudio
 import tqdm
 import yaml
 
 from loguru import logger
-from boson_multimodal.serve.serve_engine import HiggsAudioServeEngine, HiggsAudioResponse
 from boson_multimodal.data_types import Message, ChatMLSample, AudioContent, TextContent
 
-from boson_multimodal.model.higgs_audio import HiggsAudioConfig, HiggsAudioModel
+from boson_multimodal.model.higgs_audio import HiggsAudioModel
 from boson_multimodal.data_collator.higgs_audio_collator import HiggsAudioSampleCollator
 from boson_multimodal.audio_processing.higgs_audio_tokenizer import load_higgs_audio_tokenizer
 from boson_multimodal.dataset.chatml_dataset import (

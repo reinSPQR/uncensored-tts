@@ -6,11 +6,9 @@ import uuid
 import asyncio
 import base64
 import requests
-import torchaudio
-from transformers import Pipeline
 import uvicorn
 import aiohttp
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Tuple, Union
 from contextlib import asynccontextmanager
 import logging
 from datetime import datetime, timedelta
@@ -21,12 +19,8 @@ from huggingface_hub import snapshot_download
 from scipy.io import wavfile
 from fastapi import FastAPI, HTTPException, Header, Request
 import torch
-from PIL import Image, ImageFile
 from fastapi.responses import StreamingResponse
 from higgs_client import HiggsAudioModelClient, prepare_chunk_text, prepare_generation_context_single_speaker, preprocess_transcript
-
-# Allow loading of truncated images
-ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 from schema import (
     APIError, 
@@ -1419,7 +1413,7 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                 raise                
 
         # Generate audio in thread pool to avoid blocking the event loop
-        def _run_pipeline(voice_sample_audio: str):
+        def _run_pipeline(voice_sample_audio: str) -> Tuple[torch.Tensor, int]:
             try:
                 transcript = preprocess_transcript(request.input_text)
                 
@@ -1475,7 +1469,7 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                 voice_sample_audio = await loop.run_in_executor(None, _download_voice_sample, audio_file_path)
                 processing_result['voice_sample_audio'] = voice_sample_audio
                 
-                concat_wv, sr: tuple[torch.Tensor, int] = await loop.run_in_executor(None, _run_pipeline, voice_sample_audio)
+                concat_wv, sr = await loop.run_in_executor(None, _run_pipeline, voice_sample_audio)
                 processing_result['concat_wv'] = concat_wv
 
                 output_audio_file_path = os.path.join(folder_path, f"{request.request_id}_output.wav")
