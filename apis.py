@@ -5,8 +5,6 @@ import time
 import uuid
 import asyncio
 import base64
-from boson_multimodal.data_types import AudioContent, Message
-from boson_multimodal.serve.serve_engine import ChatMLSample, HiggsAudioResponse, HiggsAudioServeEngine
 import requests
 import torchaudio
 from transformers import Pipeline
@@ -25,6 +23,7 @@ from fastapi import FastAPI, HTTPException, Header, Request
 import torch
 from PIL import Image, ImageFile
 from fastapi.responses import StreamingResponse
+from higgs_client import HiggsAudioModelClient, prepare_chunk_text, prepare_generation_context_single_speaker, preprocess_transcript
 
 # Allow loading of truncated images
 ImageFile.LOAD_TRUNCATED_IMAGES = True
@@ -96,6 +95,8 @@ WEBHOOK_API_KEY = os.getenv("WEBHOOK_API_KEY", "")
 BACKEND_UPLOAD_URL = os.getenv("BACKEND_UPLOAD_URL", "")
 BACKEND_UPLOAD_ADMIN_KEY = os.getenv("BACKEND_UPLOAD_ADMIN_KEY", "no-need")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
+
+PODCAST_SCENE_PROMPT = "Audio is recorded from a quiet room."
 
 # Shutdown state
 is_shutting_down = False
@@ -1115,7 +1116,7 @@ class WebhookNotifier:
         return False
 
 # Global variables
-tts_serve_engine: HiggsAudioServeEngine | None = None
+tts_client: HiggsAudioModelClient | None = None
 
 # queue_manager: Optional[ProductionQueueManager] = None
 # cdn_uploader: Optional[CDNUploader] = None
@@ -1124,7 +1125,7 @@ task_manager: Optional[TaskManager] = None
 
 async def initialize_pipeline():
     """Initialize the audio generation pipeline"""
-    global tts_serve_engine
+    global tts_client
     try:
         logger.info("Initializing Higgs Audio generation pipeline...")
 
@@ -1136,7 +1137,14 @@ async def initialize_pipeline():
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {device}")
-        tts_serve_engine = HiggsAudioServeEngine(local_tts_model_path, local_audio_tokenizer_path, device=device)
+
+        tts_client = HiggsAudioModelClient(
+            model_path=local_tts_model_path,
+            audio_tokenizer=local_audio_tokenizer_path,
+            device=device,
+            max_new_tokens=8192,
+            use_static_kv_cache=True,
+        )
 
         logger.info("Pipeline initialized successfully")
     except Exception as e:
@@ -1399,27 +1407,6 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                 audio_base64 = base64.b64encode(audio_file.read()).decode("utf-8")
             return audio_base64
 
-        def get_voice_clone_input_sample(
-            voice_sample_audio: str,
-            voice_sample_text: str,
-            input_text: str
-        ):
-            messages = [
-                Message(
-                    role="user",
-                    content=voice_sample_text,
-                ),
-                Message(
-                    role="assistant",
-                    content=AudioContent(raw_audio=voice_sample_audio, audio_url="placeholder"),
-                ),
-                Message(
-                    role="user",
-                    content=input_text,
-                ),
-            ]
-            return ChatMLSample(messages=messages)
-
         def _download_voice_sample(audio_file_path: str) -> str:
             try:
                 # Download the voice sample to a local file
@@ -1434,22 +1421,34 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
         # Generate audio in thread pool to avoid blocking the event loop
         def _run_pipeline(voice_sample_audio: str):
             try:
-                sample = get_voice_clone_input_sample(
-                    voice_sample_audio=voice_sample_audio,
-                    voice_sample_text=request.voice_sample_text,
-                    input_text=request.input_text
+                transcript = preprocess_transcript(request.input_text)
+                
+                messages, audio_ids = prepare_generation_context_single_speaker(
+                    scene_prompt=PODCAST_SCENE_PROMPT,
+                    tone_description=None,
+                    user_voice=voice_sample_audio,
+                    user_text=request.voice_sample_text,
+                    audio_tokenizer=tts_client.audio_tokenizer,
                 )
 
-                output: HiggsAudioResponse = tts_serve_engine.generate(
-                    chat_ml_sample=sample,
-                    max_new_tokens=2048,
+                chunked_text = prepare_chunk_text(
+                    transcript,
+                    chunk_method='word',
+                    chunk_max_word_num=200,
+                )
+
+                concat_wv, sr, text_output = tts_client.generate(
+                    messages=messages,
+                    audio_ids=audio_ids,
+                    chunked_text=chunked_text,
+                    generation_chunk_buffer_size=None,
                     temperature=0.3,
-                    top_p=0.95,
                     top_k=50,
-                    stop_strings=["<|end_of_text|>", "<|eot_id|>"],
+                    top_p=0.95,
+                    seed=123,
                 )
 
-                return output
+                return concat_wv, sr
             except Exception as e:
                 logger.error(f"Pipeline execution failed for task {request.request_id}: {e}")
                 raise
@@ -1476,16 +1475,15 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                 voice_sample_audio = await loop.run_in_executor(None, _download_voice_sample, audio_file_path)
                 processing_result['voice_sample_audio'] = voice_sample_audio
                 
-                output: HiggsAudioResponse = await loop.run_in_executor(None, _run_pipeline, voice_sample_audio)
-                processing_result['output'] = output
-                
-                audio_buffer = io.BytesIO()
-                # Ensure audio data is in the correct format (int16 for WAV)
-                wavfile.write(audio_buffer, output.sampling_rate, output.audio)
-                audio_buffer.seek(0)
-                processing_result['audio_buffer'] = audio_buffer
+                concat_wv, sr: tuple[torch.Tensor, int] = await loop.run_in_executor(None, _run_pipeline, voice_sample_audio)
+                processing_result['concat_wv'] = concat_wv
 
-                audio_base64 = base64.b64encode(audio_buffer.read()).decode("utf-8")
+                output_audio_file_path = os.path.join(folder_path, f"{request.request_id}_output.wav")
+                processing_result['output_audio_file_path'] = output_audio_file_path
+
+                wavfile.write(output_audio_file_path, sr, concat_wv.numpy())
+
+                audio_base64 = base64.b64encode(open(output_audio_file_path, "rb").read()).decode("utf-8")
                 processing_result['audio_base64'] = audio_base64
             except Exception as e:
                 processing_error = e
@@ -1578,10 +1576,13 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                         pass
                 if 'voice_sample_audio' in processing_result:
                     del processing_result['voice_sample_audio']
-                if 'output' in processing_result:
-                    del processing_result['output']
-                if 'audio_buffer' in processing_result:
-                    del processing_result['audio_buffer']
+                if 'concat_wv' in processing_result:
+                    del processing_result['concat_wv']
+                if 'output_audio_file_path' in processing_result:
+                    try:
+                        os.remove(processing_result['output_audio_file_path'])
+                    except OSError:
+                        pass
                 if 'audio_base64' in processing_result:
                     del processing_result['audio_base64']
 
