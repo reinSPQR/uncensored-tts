@@ -5,6 +5,7 @@ import time
 import uuid
 import asyncio
 import base64
+from boson_multimodal.audio_processing.higgs_audio_tokenizer import HiggsAudioTokenizer, load_higgs_audio_tokenizer
 import requests
 import uvicorn
 import aiohttp
@@ -1111,6 +1112,7 @@ class WebhookNotifier:
 
 # Global variables
 tts_client: HiggsAudioModelClient | None = None
+audio_tokenizer: HiggsAudioTokenizer | None = None
 
 # queue_manager: Optional[ProductionQueueManager] = None
 # cdn_uploader: Optional[CDNUploader] = None
@@ -1119,7 +1121,7 @@ task_manager: Optional[TaskManager] = None
 
 async def initialize_pipeline():
     """Initialize the audio generation pipeline"""
-    global tts_client
+    global tts_client, audio_tokenizer
     try:
         logger.info("Initializing Higgs Audio generation pipeline...")
 
@@ -1132,9 +1134,11 @@ async def initialize_pipeline():
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {device}")
 
+        audio_tokenizer = load_higgs_audio_tokenizer(local_audio_tokenizer_path)
+
         tts_client = HiggsAudioModelClient(
             model_path=local_tts_model_path,
-            audio_tokenizer=local_audio_tokenizer_path,
+            audio_tokenizer=audio_tokenizer,
             device=device,
             max_new_tokens=8192,
             use_static_kv_cache=True,
@@ -1422,7 +1426,7 @@ async def generate_audio(request: AudioGenerationRequest) -> StreamingResponse:
                     tone_description=None,
                     user_voice=voice_sample_audio,
                     user_text=request.voice_sample_text,
-                    audio_tokenizer=tts_client.audio_tokenizer,
+                    audio_tokenizer=audio_tokenizer,
                 )
 
                 chunked_text = prepare_chunk_text(
